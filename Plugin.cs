@@ -4,6 +4,9 @@
 // nothing is uploaded anywhere.
 using System;
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Drawing;
+using System.Windows.Forms;
 using System.IO;
 using System.IO.Pipes;
 using System.Net;
@@ -55,12 +58,12 @@ namespace MusicBeePlugin
       about.TargetApplication = "";
       about.Type = PluginType.General;
       about.VersionMajor = 1;
-      about.VersionMinor = 0;
+      about.VersionMinor = 1;
       about.Revision = 0;
       about.MinInterfaceVersion = MinInterfaceVersion;
       about.MinApiRevision = MinApiRevision;
       about.ReceiveNotifications = ReceiveNotificationFlags.PlayerEvents;
-      about.ConfigurationPanelHeight = 0;
+      about.ConfigurationPanelHeight = PanelHeight();
 
       string dir = mbApi.Setting_GetPersistentStoragePath();
       iniPath = Path.Combine(dir, "BeePresence.ini");
@@ -73,15 +76,66 @@ namespace MusicBeePlugin
       return about;
     }
 
+    // ---- Settings panel (shown inline in MusicBee's Preferences > Plugins) ----
+    private TextBox idBox;
+    private CheckBox pausedBox, artBox;
+    private volatile bool reconnect;
+
+    private static int PanelHeight()
+    {
+      int line = TextRenderer.MeasureText("Ag", SystemFonts.MessageBoxFont).Height;
+      return line * 6 + 8;
+    }
+
     public bool Configure(IntPtr panelHandle)
     {
-      // No UI: open the ini in the default editor. Changes apply after restarting MusicBee
-      // (or disabling/enabling the plugin).
-      try { LoadSettings(); System.Diagnostics.Process.Start(iniPath); } catch { }
+      LoadSettings();
+      if (panelHandle == IntPtr.Zero) return false;
+      var panel = (Panel)Control.FromHandle(panelHandle);
+      var font = panel.Font;
+      int gap = font.Height / 2, y = 0;
+
+      var idLabel = new Label { Text = "Discord Application ID:", AutoSize = true };
+      idBox = new TextBox { Text = clientId, Width = TextRenderer.MeasureText("00000000000000000000000", font).Width };
+      var link = new LinkLabel { Text = "Create your own…", AutoSize = true };
+      link.LinkClicked += (s, e) => { try { Process.Start("https://discord.com/developers/applications"); } catch { } };
+      idLabel.Location = new Point(0, y + (idBox.PreferredHeight - idLabel.PreferredHeight) / 2);
+      idBox.Location = new Point(idLabel.PreferredWidth + gap, y);
+      link.Location = new Point(idBox.Right + gap, idLabel.Top);
+      y += idBox.PreferredHeight + 2;
+
+      var hint = new Label { Text = "Discord shows this application's name as \"Listening to <name>\".", AutoSize = true, Location = new Point(0, y) };
+      y += hint.PreferredHeight + gap;
+
+      pausedBox = new CheckBox { Text = "Keep showing the song while paused", AutoSize = true, Checked = showWhenPaused, Location = new Point(0, y) };
+      y += pausedBox.PreferredSize.Height + 2;
+      artBox = new CheckBox { Text = "Show album cover (looked up on iTunes)", AutoSize = true, Checked = coverArt, Location = new Point(0, y) };
+
+      panel.Controls.AddRange(new Control[] { idLabel, idBox, link, hint, pausedBox, artBox });
       return false;
     }
 
-    public void SaveSettings() { }
+    // Called by MusicBee when the user clicks Save/Apply in Preferences. Takes effect immediately.
+    public void SaveSettings()
+    {
+      if (idBox == null || idBox.IsDisposed) return;
+      string id = idBox.Text.Trim();
+      if (Regex.IsMatch(id, "^[0-9]{15,25}$"))
+      {
+        if (id != clientId) reconnect = true;
+        clientId = id;
+      }
+      else
+      {
+        MessageBox.Show("That doesn't look like a Discord Application ID (it should be a long number). Keeping " + clientId + ".",
+          "BeePresence", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        idBox.Text = clientId;
+      }
+      showWhenPaused = pausedBox.Checked;
+      coverArt = artBox.Checked;
+      WriteSettings();
+      Refresh();
+    }
 
     public void Close(PluginCloseReason reason)
     {
@@ -165,6 +219,13 @@ namespace MusicBeePlugin
           lock (stateLock) t = desired;
           string json = BuildActivityJson(t);
 
+          if (reconnect)
+          {
+            // Application ID changed: drop the old connection (Discord clears its presence).
+            reconnect = false;
+            try { ipc?.Dispose(); } catch { }
+            ipc = null;
+          }
           if (ipc == null || !ipc.Connected)
           {
             ipc?.Dispose();
@@ -299,16 +360,7 @@ namespace MusicBeePlugin
     {
       try
       {
-        if (!File.Exists(iniPath))
-        {
-          File.WriteAllText(iniPath,
-            "; BeePresence settings. Restart MusicBee after editing.\r\n" +
-            "; client_id = a Discord application ID (https://discord.com/developers/applications).\r\n" +
-            ";   The application's name is what shows as \"Listening to <name>\" in the member list.\r\n" +
-            "client_id=" + clientId + "\r\n" +
-            "show_when_paused=false\r\n" +
-            "cover_art=true\r\n");
-        }
+        if (!File.Exists(iniPath)) { WriteSettings(); return; }
         foreach (var raw in File.ReadAllLines(iniPath))
         {
           var line = raw.Trim();
@@ -321,6 +373,19 @@ namespace MusicBeePlugin
         }
       }
       catch (Exception e) { Log("settings: " + e.Message); }
+    }
+
+    private void WriteSettings()
+    {
+      try
+      {
+        File.WriteAllText(iniPath,
+          "; BeePresence settings (normally edited in MusicBee: Preferences > Plugins > BeePresence).\r\n" +
+          "client_id=" + clientId + "\r\n" +
+          "show_when_paused=" + (showWhenPaused ? "true" : "false") + "\r\n" +
+          "cover_art=" + (coverArt ? "true" : "false") + "\r\n");
+      }
+      catch (Exception e) { Log("settings write: " + e.Message); }
     }
 
     private readonly object logLock = new object();

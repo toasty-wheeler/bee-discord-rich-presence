@@ -31,17 +31,13 @@ Discord now supports things that make most of DiscordBee's machinery unnecessary
 
 ## Settings
 
-Click **Configure** on the plugin in MusicBee's Preferences → Plugins, or edit `%APPDATA%\MusicBee\BeePresence.ini` directly:
+Open MusicBee **Preferences → Plugins**. The BeePresence settings appear right under the plugin:
 
-```ini
-client_id=910864681588105236   ; Discord application ID; its name shows as "Listening to <name>"
-show_when_paused=false
-cover_art=true
-```
+- **Discord Application ID**: Discord shows this application's name as "Listening to &lt;name&gt;". To use your own name, click **Create your own…**, make an application at the Discord Developer Portal, and paste its Application ID here.
+- **Keep showing the song while paused**
+- **Show album cover**: looks the cover up on iTunes.
 
-To change the name Discord shows, create an application at <https://discord.com/developers/applications>, name it whatever you like, and paste its Application ID into `client_id`. Restart MusicBee after editing.
-
-Problems are logged to `%APPDATA%\MusicBee\BeePresence.log`. The log is capped at 256 KB.
+Changes apply as soon as you click **Save** or **Apply**; no restart is needed. The settings are stored in `%APPDATA%\MusicBee\BeePresence.ini`, and problems are logged to `BeePresence.log` in the same folder. The log is capped at 256 KB.
 
 ## Build
 
