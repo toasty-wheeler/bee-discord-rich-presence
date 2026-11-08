@@ -4,6 +4,8 @@ A lightweight [MusicBee](https://getmusicbee.com/) plugin that shows what you're
 
 It's a single small DLL with no third-party dependencies.
 
+![BeePresence showing "Listening to MusicBee" on a Discord profile, with album cover, track, artist, album and progress bar](docs/preview.png)
+
 ## Why not DiscordBee?
 
 [DiscordBee](https://github.com/sll552/DiscordBee) was the go-to plugin for this, but it no longer works properly with current Discord and hasn't been maintained since 2023:
