@@ -25,6 +25,8 @@ namespace MusicBeePlugin
     private string clientId = "910864681588105236"; // DiscordBee's app ("MusicBee"); override in BeePresence.ini
     private bool showWhenPaused = false;
     private bool coverArt = true;
+    private bool useLastfm = true, useDeezer = true, useItunes = true;
+    private string lastfmKey = "";
     private string logPath, iniPath;
 
     private Thread worker;
@@ -58,7 +60,7 @@ namespace MusicBeePlugin
       about.TargetApplication = "";
       about.Type = PluginType.General;
       about.VersionMajor = 1;
-      about.VersionMinor = 1;
+      about.VersionMinor = 2;
       about.Revision = 0;
       about.MinInterfaceVersion = MinInterfaceVersion;
       about.MinApiRevision = MinApiRevision;
@@ -78,13 +80,14 @@ namespace MusicBeePlugin
 
     // ---- Settings panel (shown inline in MusicBee's Preferences > Plugins) ----
     private TextBox idBox;
-    private CheckBox pausedBox, artBox;
+    private CheckBox pausedBox, artBox, lastfmBox, deezerBox, itunesBox;
+    private TextBox keyBox;
     private volatile bool reconnect;
 
     private static int PanelHeight()
     {
       int line = TextRenderer.MeasureText("Ag", SystemFonts.MessageBoxFont).Height;
-      return line * 6 + 8;
+      return line * 7 + 10;
     }
 
     public bool Configure(IntPtr panelHandle)
@@ -109,9 +112,35 @@ namespace MusicBeePlugin
 
       pausedBox = new CheckBox { Text = "Keep showing the song while paused", AutoSize = true, Checked = showWhenPaused, Location = new Point(0, y) };
       y += pausedBox.PreferredSize.Height + 2;
-      artBox = new CheckBox { Text = "Show album cover (looked up on iTunes)", AutoSize = true, Checked = coverArt, Location = new Point(0, y) };
+      artBox = new CheckBox { Text = "Show album cover from:", AutoSize = true, Checked = coverArt, Location = new Point(0, y) };
+      int x = artBox.PreferredSize.Width + gap;
+      lastfmBox = new CheckBox { Text = "Last.fm", AutoSize = true, Checked = useLastfm, Location = new Point(x, y) };
+      x += lastfmBox.PreferredSize.Width + gap;
+      deezerBox = new CheckBox { Text = "Deezer", AutoSize = true, Checked = useDeezer, Location = new Point(x, y) };
+      x += deezerBox.PreferredSize.Width + gap;
+      itunesBox = new CheckBox { Text = "iTunes", AutoSize = true, Checked = useItunes, Location = new Point(x, y) };
+      y += artBox.PreferredSize.Height + 2;
 
-      panel.Controls.AddRange(new Control[] { idLabel, idBox, link, hint, pausedBox, artBox });
+      int indent = font.Height + 2;
+      var keyLabel = new Label { Text = "Last.fm API key:", AutoSize = true };
+      keyBox = new TextBox { Text = lastfmKey, Width = TextRenderer.MeasureText("00000000000000000000000000000000000", font).Width };
+      var keyLink = new LinkLabel { Text = "Get a free key…", AutoSize = true };
+      keyLink.LinkClicked += (s, e) => { try { Process.Start("https://www.last.fm/api/account/create"); } catch { } };
+      keyLabel.Location = new Point(indent, y + (keyBox.PreferredHeight - keyLabel.PreferredHeight) / 2);
+      keyBox.Location = new Point(indent + keyLabel.PreferredWidth + gap, y);
+      keyLink.Location = new Point(keyBox.Right + gap, keyLabel.Top);
+
+      // Sub-options only matter when covers are on (and the key only when Last.fm is on).
+      void Sync()
+      {
+        lastfmBox.Enabled = deezerBox.Enabled = itunesBox.Enabled = artBox.Checked;
+        keyLabel.Enabled = keyBox.Enabled = keyLink.Enabled = artBox.Checked && lastfmBox.Checked;
+      }
+      artBox.CheckedChanged += (s, e) => Sync();
+      lastfmBox.CheckedChanged += (s, e) => Sync();
+      Sync();
+
+      panel.Controls.AddRange(new Control[] { idLabel, idBox, link, hint, pausedBox, artBox, lastfmBox, deezerBox, itunesBox, keyLabel, keyBox, keyLink });
       return false;
     }
 
@@ -132,7 +161,14 @@ namespace MusicBeePlugin
         idBox.Text = clientId;
       }
       showWhenPaused = pausedBox.Checked;
+      bool coversChanged = coverArt != artBox.Checked || useLastfm != lastfmBox.Checked || useDeezer != deezerBox.Checked ||
+                           useItunes != itunesBox.Checked || lastfmKey != keyBox.Text.Trim();
       coverArt = artBox.Checked;
+      useLastfm = lastfmBox.Checked;
+      useDeezer = deezerBox.Checked;
+      useItunes = itunesBox.Checked;
+      lastfmKey = keyBox.Text.Trim();
+      if (coversChanged) artCache.Clear(); // re-look-up with the new sources
       WriteSettings();
       Refresh();
     }
@@ -292,39 +328,110 @@ namespace MusicBeePlugin
     private static string Field(string s)
     {
       s = s ?? "";
-      if (s.Length < 2) s = s.PadRight(2, '⠀');
+      if (s.Length < 2) s = s.PadRight(2, '⠀'); // braille blank: invisible but counts as a char
       if (s.Length > 128) s = s.Substring(0, 127) + "…";
       return s;
     }
 
-    // Look up album art on the iTunes Search API (free, no key). Discord accepts
-    // external https URLs as large_image directly, so nothing needs to be uploaded.
+    // Find a public cover image URL. Discord accepts external https URLs as large_image
+    // directly, so nothing needs to be uploaded. Sources are tried most-exact first:
+    // Last.fm (exact artist+album lookup, needs a free API key) -> Deezer (fielded search)
+    // -> iTunes (keyword search).
     private string GetCoverUrl(Track t)
     {
       string key = (t.Artist + "|" + (string.IsNullOrEmpty(t.Album) ? "#" + t.Title : t.Album)).ToLowerInvariant();
       if (artCache.TryGetValue(key, out var cached)) return cached;
-      string url = null;
-      try
+
+      var sources = new System.Collections.Generic.List<(string name, Func<Track, string> find)>();
+      if (useLastfm && !string.IsNullOrEmpty(lastfmKey)) sources.Add(("Last.fm", FindLastfm));
+      if (useDeezer) sources.Add(("Deezer", FindDeezer));
+      if (useItunes) sources.Add(("iTunes", FindItunes));
+
+      bool anyError = false;
+      foreach (var (name, find) in sources)
       {
-        bool byAlbum = !string.IsNullOrEmpty(t.Album);
-        string term = t.Artist + " " + (byAlbum ? t.Album : t.Title);
-        string q = "https://itunes.apple.com/search?media=music&limit=1&entity=" + (byAlbum ? "album" : "song") +
-                   "&term=" + Uri.EscapeDataString(term);
-        string body = http.GetStringAsync(q).GetAwaiter().GetResult();
-        var m = Regex.Match(body, "\"artworkUrl100\"\\s*:\\s*\"(https?://[^\"]+)\"");
-        if (m.Success) url = m.Groups[1].Value.Replace("100x100bb", "512x512bb");
-        else if (byAlbum)
+        try
         {
-          // Album titles in local tags are often messy; retry with the track title.
-          q = "https://itunes.apple.com/search?media=music&limit=1&entity=song&term=" + Uri.EscapeDataString(t.Artist + " " + t.Title);
-          body = http.GetStringAsync(q).GetAwaiter().GetResult();
-          m = Regex.Match(body, "\"artworkUrl100\"\\s*:\\s*\"(https?://[^\"]+)\"");
-          if (m.Success) url = m.Groups[1].Value.Replace("100x100bb", "512x512bb");
+          string url = find(t);
+          if (url != null) { artCache[key] = url; return url; }
         }
-        artCache[key] = url; // cache misses too, so we don't hammer the API
+        catch (Exception e) { anyError = true; Log("art (" + name + "): " + e.Message); }
       }
-      catch (Exception e) { Log("art: " + e.Message); } // network error: don't cache, retry next time
+      if (!anyError) artCache[key] = null; // genuine miss everywhere: cache it so we don't hammer the APIs
+      return null;
+    }
+
+    // Returns the body even for 4xx (Last.fm explains bad keys in the body); throws on
+    // server errors/rate limits so the miss isn't cached.
+    private static string Get(string url)
+    {
+      using (var r = http.GetAsync(url).GetAwaiter().GetResult())
+      {
+        int code = (int)r.StatusCode;
+        if (code >= 500 || code == 429) throw new HttpRequestException("HTTP " + code);
+        return r.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+      }
+    }
+    private static string Unescape(string jsonString) => jsonString.Replace("\\/", "/");
+    private static string Clean(string s) => (s ?? "").Replace("\"", "");
+
+    private string FindLastfm(Track t)
+    {
+      string baseUrl = "https://ws.audioscrobbler.com/2.0/?format=json&autocorrect=1&api_key=" + Uri.EscapeDataString(lastfmKey) +
+                       "&artist=" + Uri.EscapeDataString(t.Artist);
+      string url = null;
+      if (!string.IsNullOrEmpty(t.Album))
+        url = LastfmImage(Get(baseUrl + "&method=album.getinfo&album=" + Uri.EscapeDataString(t.Album)));
+      if (url == null) // track.getInfo carries the album's images too
+        url = LastfmImage(Get(baseUrl + "&method=track.getinfo&track=" + Uri.EscapeDataString(t.Title)));
       return url;
+    }
+
+    private string LastfmImage(string body)
+    {
+      var err = Regex.Match(body, "\"error\"\\s*:\\s*(\\d+)");
+      if (err.Success && (err.Groups[1].Value == "10" || err.Groups[1].Value == "26"))
+        throw new Exception("invalid or suspended Last.fm API key");
+      string best = null;
+      foreach (Match m in Regex.Matches(body, "\"#text\"\\s*:\\s*\"(https://[^\"]+/i/u/[^\"]+)\""))
+        best = Unescape(m.Groups[1].Value); // images are listed small -> mega; keep the largest
+      // Last.fm's grey star placeholder means "no cover".
+      if (best == null || best.Contains("2a96cbd8b46e442fc41c2b86b821562f")) return null;
+      return Regex.Replace(best, "/i/u/[^/]+/", "/i/u/600x600/");
+    }
+
+    private string FindDeezer(Track t)
+    {
+      string url = null;
+      if (!string.IsNullOrEmpty(t.Album))
+      {
+        string q = "artist:\"" + Clean(t.Artist) + "\" album:\"" + Clean(t.Album) + "\"";
+        var m = Regex.Match(Get("https://api.deezer.com/search/album?limit=1&q=" + Uri.EscapeDataString(q)), "\"cover_xl\"\\s*:\\s*\"([^\"]+)\"");
+        if (m.Success) url = Unescape(m.Groups[1].Value);
+      }
+      // Deezer's fielded track search misses some well-known songs; plain keywords catch those.
+      foreach (string q in new[] { "artist:\"" + Clean(t.Artist) + "\" track:\"" + Clean(t.Title) + "\"", t.Artist + " " + t.Title })
+      {
+        if (url != null) break;
+        var m = Regex.Match(Get("https://api.deezer.com/search?limit=1&q=" + Uri.EscapeDataString(q)), "\"cover_xl\"\\s*:\\s*\"([^\"]+)\"");
+        if (m.Success) url = Unescape(m.Groups[1].Value);
+      }
+      return url;
+    }
+
+    private string FindItunes(Track t)
+    {
+      bool byAlbum = !string.IsNullOrEmpty(t.Album);
+      string q = "https://itunes.apple.com/search?media=music&limit=1&entity=" + (byAlbum ? "album" : "song") +
+                 "&term=" + Uri.EscapeDataString(t.Artist + " " + (byAlbum ? t.Album : t.Title));
+      var m = Regex.Match(Get(q), "\"artworkUrl100\"\\s*:\\s*\"(https?://[^\"]+)\"");
+      if (!m.Success && byAlbum)
+      {
+        // Album titles in local tags are often messy; retry with the track title.
+        q = "https://itunes.apple.com/search?media=music&limit=1&entity=song&term=" + Uri.EscapeDataString(t.Artist + " " + t.Title);
+        m = Regex.Match(Get(q), "\"artworkUrl100\"\\s*:\\s*\"(https?://[^\"]+)\"");
+      }
+      return m.Success ? m.Groups[1].Value.Replace("100x100bb", "512x512bb") : null;
     }
 
     private static string J(string s)
@@ -370,6 +477,10 @@ namespace MusicBeePlugin
           if (k == "client_id" && v.Length > 0) clientId = v;
           else if (k == "show_when_paused") showWhenPaused = v.Equals("true", StringComparison.OrdinalIgnoreCase);
           else if (k == "cover_art") coverArt = !v.Equals("false", StringComparison.OrdinalIgnoreCase);
+          else if (k == "cover_lastfm") useLastfm = !v.Equals("false", StringComparison.OrdinalIgnoreCase);
+          else if (k == "cover_deezer") useDeezer = !v.Equals("false", StringComparison.OrdinalIgnoreCase);
+          else if (k == "cover_itunes") useItunes = !v.Equals("false", StringComparison.OrdinalIgnoreCase);
+          else if (k == "lastfm_api_key") lastfmKey = v;
         }
       }
       catch (Exception e) { Log("settings: " + e.Message); }
@@ -383,7 +494,11 @@ namespace MusicBeePlugin
           "; BeePresence settings (normally edited in MusicBee: Preferences > Plugins > BeePresence).\r\n" +
           "client_id=" + clientId + "\r\n" +
           "show_when_paused=" + (showWhenPaused ? "true" : "false") + "\r\n" +
-          "cover_art=" + (coverArt ? "true" : "false") + "\r\n");
+          "cover_art=" + (coverArt ? "true" : "false") + "\r\n" +
+          "cover_lastfm=" + (useLastfm ? "true" : "false") + "\r\n" +
+          "cover_deezer=" + (useDeezer ? "true" : "false") + "\r\n" +
+          "cover_itunes=" + (useItunes ? "true" : "false") + "\r\n" +
+          "lastfm_api_key=" + lastfmKey + "\r\n");
       }
       catch (Exception e) { Log("settings write: " + e.Message); }
     }

@@ -21,7 +21,7 @@ Discord now supports things that make most of DiscordBee's machinery unnecessary
 | | DiscordBee | BeePresence |
 |---|---|---|
 | Talking to Discord | discord-rpc-csharp library plus about a dozen support DLLs | ~150 lines speaking Discord's local IPC pipe directly |
-| Album art | Uploads every cover to Imgur | Looks the album up on the free iTunes Search API and passes that URL straight to Discord, so nothing is uploaded |
+| Album art | Uploads every cover to Imgur | Finds the cover on Last.fm, Deezer or iTunes and passes that URL straight to Discord, so nothing is uploaded |
 | Activity type | "Playing" | "Listening to", with the artist shown in your status, like Spotify |
 
 ## Install
@@ -37,7 +37,10 @@ Open MusicBee **Preferences → Plugins**. The BeePresence settings appear right
 
 - **Discord Application ID**: Discord shows this application's name as "Listening to &lt;name&gt;". To use your own name, click **Create your own…**, make an application at the Discord Developer Portal, and paste its Application ID here.
 - **Keep showing the song while paused**
-- **Show album cover**: looks the cover up on iTunes.
+- **Show album cover from: Last.fm / Deezer / iTunes**: the enabled sources are tried in that order, from the most exact match to the loosest:
+  - **Last.fm** looks up the exact artist and album, with typo autocorrection. It needs a free API key: click **Get a free key…**, fill in the form (only the application name is required), and paste the **API key** into the box. Without a key, Last.fm is skipped.
+  - **Deezer** searches by artist and album, with no key needed.
+  - **iTunes** does a keyword search, with no key needed. It works as a catch-all.
 
 Changes apply as soon as you click **Save** or **Apply**; no restart is needed. The settings are stored in `%APPDATA%\MusicBee\BeePresence.ini`, and problems are logged to `BeePresence.log` in the same folder. The log is capped at 256 KB.
 
@@ -53,5 +56,6 @@ The output is `bin/Release/net48/mb_BeePresence.dll`.
 
 ## Notes
 
-- Cover art is matched by artist and album through iTunes search. Obscure releases may get no cover or the wrong one.
+- Covers are matched by artist and album name. Very obscure releases may get no cover or the wrong one. Last.fm gives the best matches for local libraries with messy tags.
+- SoundCloud isn't supported as a cover source: its API has been closed to new apps for years, and searching it without one means scraping, which tends to break.
 - `MusicBeeInterface.cs` is MusicBee's standard plugin API file (by Steven Mayall), included as in every MusicBee plugin. Everything else is original code.
